@@ -1,0 +1,563 @@
+---
+title: "Single cell research re-analysis"
+output:
+  html_document:
+    theme: united
+    df_print: kable
+date: ''
+---
+
+```{r load, echo=FALSE, results="hide", warning=FALSE}
+# BiocManager
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+# BiocManager::install(version = "3.14")
+
+# Visualization packages
+library(ggplot2)
+library(patchwork)
+
+# install.packages("fpc")
+library(fpc)
+
+# https://github.com/satijalab/seurat/issues/4239
+library(Seurat)
+library(dplyr)
+
+library(irlba)
+library(Rtsne)
+library(data.table)
+```
+
+
+```{r read-data}
+# Read the entire file
+tirosh <- read.delim("GSE72056_melanoma_single_cell_revised_v2.txt.gz", header = T, stringsAsFactors = F)
+
+# Link to GEO database
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE72056
+
+# Links to download (https/ftp)
+# https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE72056&format=file&file=GSE72056%5Fmelanoma%5Fsingle%5Fcell%5Frevised%5Fv2%2Etxt%2Egz
+# https://ftp.ncbi.nlm.nih.gov/geo/series/GSE72nnn/GSE72056/suppl/GSE72056%5Fmelanoma%5Fsingle%5Fcell%5Frevised%5Fv2.txt.gz
+```
+
+
+```{r edata}
+# Only gene information
+tirosh_genes <- tirosh[-1:-3,]
+```
+
+
+```{r meta-data}
+# Prepare meta-data
+# There are some duplicate gene names - make names unique
+gene_list <- tirosh_genes %>% 
+  pull("Cell") %>% 
+  make.unique(sep = ".")
+
+rownames(tirosh_genes) <- gene_list # unique rownames
+tirosh_genes <- tirosh_genes[, -1] # remove gene names
+tirosh_meta <- tirosh[1:3,] # pull meta-data
+rownames(tirosh_meta) <- tirosh_meta[, 1] # rename rownames to column 1 values
+tirosh_meta <- tirosh_meta[, -1] # remove column 1
+
+# Transpose meta data
+# Seurat expects meta data to have cell names as rows and meta data values as columns
+tirosh_meta_transpose <- data.frame(t(tirosh_meta))
+
+```
+
+
+```{r}
+# There are some weird tumor ID entries here called "monika" and "SS2"
+# Neither the article nor supplementary material mention these
+# Remove those
+cell_names <- colnames(tirosh_genes)
+extracted_info <- sapply(cell_names, function(x) paste0("Mel", substr(x, 3, 4)))
+unique(extracted_info)
+incorrect_entries <- which(extracted_info %in% c("Mel2_", "Melni"))
+tirosh_genes <- tirosh_genes[, -incorrect_entries]
+
+```
+
+```{r seurat-obj}
+# Create a Seurat Object
+tirosh_seurat <- CreateSeuratObject(counts = tirosh_genes, meta.data = tirosh_meta_transpose, project = "tirosh")
+
+# Verify
+# View(tirosh_seurat@meta.data)
+```
+
+
+```{r}
+# Extract tumor ID and save to metadata
+cell_names <- colnames(tirosh_seurat)
+
+extracted_info <- sapply(cell_names, function(x) paste0("Mel", substr(x, 3, 4)))
+tirosh_seurat$tumor_id <- extracted_info
+
+unique(tirosh_seurat$tumor_id)
+length(unique(tirosh_seurat$tumor_id)) # should be 19
+```
+
+## Data pre-processing
+
+```{r}
+# no information about mitochondrial genes
+tirosh_seurat[["percent.mt"]] <- PercentageFeatureSet(tirosh_seurat, pattern = "^MT-") # "^mt-" also gives zeros
+
+tirosh_seurat
+```
+
+
+
+```{r qc}
+# Quality control
+# Distribution of features and counts
+
+# with percent.mt
+# VlnPlot(tirosh_seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# without percent.mt
+VlnPlot(tirosh_seurat, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+# Count vs features
+FeatureScatter(tirosh_seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + ggtitle(NULL)
+
+```
+
+
+```{r malign}
+# Separate malignant and non-malignant
+non_malignant_cells <- subset(tirosh_seurat, subset = malignant.1.no.2.yes.0.unresolved. == 1)
+malignant_cells <- subset(tirosh_seurat, subset = malignant.1.no.2.yes.0.unresolved. == 2)
+
+```
+
+
+
+```{r cell-types-count}
+# Do a quick count of non-/malignant cells
+cell_type_counts <- tirosh_seurat@meta.data[["malignant.1.no.2.yes.0.unresolved."]]
+cell_type_counts <- table(cell_type_counts)
+names(cell_type_counts) <- c("unresolved", "no", "yes")
+cell_type_counts
+
+```
+
+
+## Dimensionality reduction
+
+
+### Non-malignant cells
+
+```{r}
+non_malignant_cells
+```
+
+```{r}
+
+# Rename cluster names with corresponding cell type
+cluster_names <- c("unresolved", "T-cells", "B-cells", "Macrophages", "Endothelial", "CAF", "NK")
+non_malignant_cells@meta.data$cell_type <- cluster_names[non_malignant_cells@meta.data$non.malignant.cell.type..1.T.2.B.3.Macro.4.Endo..5.CAF.6.NK + 1]
+```
+
+```{r}
+non_malignant_cells <- NormalizeData(non_malignant_cells)
+all.genes <- rownames(non_malignant_cells)
+non_malignant_cells <- ScaleData(non_malignant_cells, features = all.genes)
+non_malignant_cells <- RunPCA(non_malignant_cells, features = all.genes) # it's all genes by default
+
+```
+
+```{r dim-heat-map fig.height=15, fig.width=9}
+# DimHeatmap(non_malignant_cells, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r nonm-tnse, fig.height=5, fig.width=6}
+# t-SNE using 15 dimensions
+
+# https://satijalab.org/seurat/reference/runtsne
+non_malignant_cells <- RunTSNE(non_malignant_cells,
+                               dims = 1:15, seed.use = 40, tsne.method = "Rtsne",
+                               dim.embed = 2, reduction.key = "tSNE_")
+
+# https://satijalab.org/seurat/reference/dimplot
+DimPlot(non_malignant_cells,
+        reduction="tsne",
+        group.by = "cell_type",
+        pt.size = 1.5) + ggtitle(NULL)
+
+DimPlot(non_malignant_cells,
+        reduction="tsne",
+        group.by = "tumor_id",
+        pt.size = 1.5) + ggtitle(NULL)
+
+```
+
+### Malignant cells
+
+```{r}
+malignant_cells
+```
+
+```{r}
+malignant_cells <- NormalizeData(malignant_cells)
+all.genes <- rownames(malignant_cells)
+malignant_cells <- ScaleData(malignant_cells, features = all.genes)
+malignant_cells <- RunPCA(malignant_cells, features = all.genes)
+
+
+```
+
+```{r fig.height=15, fig.width=9}
+# DimHeatmap(malignant_cells, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r fig.height=5, fig.width=6}
+
+# https://satijalab.org/seurat/reference/runtsne
+malignant_cells <- RunTSNE(malignant_cells,
+                           dims = 1:15, seed.use = 40, tsne.method = "Rtsne",
+                           dim.embed = 2, reduction.key = "tSNE_")
+
+# https://satijalab.org/seurat/reference/dimplot
+DimPlot(malignant_cells,
+        reduction="tsne",
+        group.by = "tumor_id",
+        pt.size = 1.5,
+        label=F) + ggtitle(NULL)
+
+```
+
+### Variable features
+
+This analysis only concerns non-malignant cells
+
+```{r var-feat, fig.height=5, fig.width=5}
+
+# https://satijalab.org/seurat/reference/findvariablefeatures
+# 
+non_malignant_cells <- FindVariableFeatures(non_malignant_cells, selection.method = "vst", nfeatures = 1000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(non_malignant_cells), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(non_malignant_cells)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+# plot1 + plot2 # fig.width=11
+
+plot2  # fig.width=5
+
+```
+
+```{r}
+
+# Scaling on features identified as variable
+non_malignant_cells <- ScaleData(non_malignant_cells)
+non_malignant_cells <- RunPCA(non_malignant_cells, features = VariableFeatures(object = non_malignant_cells))
+
+```
+
+
+```{r fig.height=15, fig.width=9}
+# DimHeatmap(non_malignant_cells, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r fig.height=5, fig.width=6}
+# t-SNE based on 15 PCs (dims) obtained via variable features
+
+non_malignant_cells <- RunTSNE(non_malignant_cells, dims = 1:15,
+                               seed.use = 3, tsne.method = "Rtsne",
+                               dim.embed = 2, reduction.key = "tSNE_")
+
+DimPlot(non_malignant_cells,
+        reduction="tsne",
+        group.by = "cell_type",
+        pt.size = 1.5,
+        label=F) + ggtitle(NULL)
+
+DimPlot(non_malignant_cells,
+        reduction="tsne",
+        group.by = "tumor_id",
+        pt.size = 1.5,
+        label=F) + ggtitle(NULL)
+
+```
+
+
+```{r fig.height=5, fig.width=6}
+# UMAP using 15 PCs obtained via variable features
+
+# https://satijalab.org/seurat/reference/runumap
+non_malignant_cells <- RunUMAP(non_malignant_cells, dims = 1:15,
+                               seed.use = 1, umap.method = "uwot",
+                               n.components = 2, n.neighbors = 10, reduction.key = "UMAP_")
+
+DimPlot(non_malignant_cells,
+        reduction="umap",
+        group.by = "cell_type",
+        pt.size = 1.5, label=F) + ggtitle(NULL)
+
+DimPlot(non_malignant_cells,
+        reduction="umap",
+        group.by = "tumor_id",
+        pt.size = 1.5, label=F) + ggtitle(NULL)
+
+```
+
+
+
+```{r fig.height=12, fig.width=20}
+
+# Simple loop for plotting PCs (1-6) against each other
+
+plot_list <- list()
+
+for (x in 1:6) {
+  for (y in x:6) {
+    if (x != y) {
+      plot <- DimPlot(non_malignant_cells,
+          reduction="pca",
+          dims=c(x,y),
+          group.by = "tumor_id",
+          pt.size = 0.3) + plot_annotation(title=sprintf("% s % s", x, y)) +
+                           NoLegend() + ggtitle(NULL)
+      plot_list[[length(plot_list) + 1]] <- plot
+    }
+  }
+}
+
+# Parameter to explore
+# group.by = "tumor_id", to search for possible batch effect (all pretty well mixed, clumped into 2 major clusters in most cases)
+# group.by = "cell_type", for simple preliminary dimension reduction (non-linear methods might be better)
+
+combined_plot <- wrap_plots(plot_list, ncol = 5)
+combined_plot # too big and messy to be added in the final report
+```
+
+```{r fig.height=15, fig.width=9}
+DimHeatmap(non_malignant_cells, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+```{r}
+ElbowPlot(non_malignant_cells)
+```
+
+### Clustering
+
+PCs from the variable feature analysis will be used
+
+SNN implemented in Seurat
+https://satijalab.org/seurat/reference/findneighbors
+https://satijalab.org/seurat/reference/findclusters
+
+Alternative method, possible extension for the future - finding biomarkers through differential expression to define clusters
+https://satijalab.org/seurat/articles/pbmc3k_tutorial.html#finding-differentially-expressed-features-cluster-biomarkers
+
+
+```{r}
+# Parameters to test:
+# dims - number of PCs
+# resolution - more/less communities
+
+non_malignant_cells <- FindNeighbors(non_malignant_cells, dims = 1:15)
+non_malignant_cells <- FindClusters(non_malignant_cells,
+                                    resolution = 0.1,
+                                    random.seed = 40,
+                                    n.start = 10, # default values for n.start, n.iter
+                                    n.iter = 10)
+
+```
+
+```{r fig.height=5, fig.width=6}
+
+# Change group.by parameter according to the chosen resolution
+
+DimPlot(non_malignant_cells,
+        reduction="umap",
+        group.by = "RNA_snn_res.0.1",
+        pt.size = 1.5, label=F) + ggtitle(NULL)
+```
+
+```{r}
+# Check if metadata field's name matches resolution in FindClusters
+preds <- non_malignant_cells@meta.data$RNA_snn_res.0.1
+
+labels <- non_malignant_cells@meta.data$cell_type # from the article
+
+# The plan was to calculate e.g. ARI between predictions and "ground truth" labels
+# but since predicted clusters visibly don't match those in the original article,
+# which would make relabeling predictions a bit ambiguous (defining what a "match" is),
+# the idea was scrapped
+```
+
+
+## Trajectory analysis
+
+
+```{r}
+# Monocle3 installation instructions
+# https://cole-trapnell-lab.github.io/monocle3/docs/installation/
+
+# Common issue with devtools on Windows
+# https://github.com/cole-trapnell-lab/monocle3/issues/172
+
+# Solution:
+# 1) Install Rtools on Windows
+# https://cran.r-project.org/bin/windows/Rtools/
+# 2) Then run:
+# options(buildtools.check = function(action) TRUE )
+# 3) After that install packages by running:
+
+# BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+#                        'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+#                        'SummarizedExperiment', 'batchelor', 'HDF5Array',
+#                        'terra', 'ggrastr'))
+# 
+# install.packages("devtools")
+# devtools::install_github('cole-trapnell-lab/monocle3')
+```
+
+```{r}
+# or just install from bioconductor...
+# BiocManager::install("monocle")
+```
+
+```{r}
+# other solution - seurat-wrapper for extra functions
+# install.packages("R.utils")
+# install.packages("rlang")
+
+# library(remotes)
+# remotes::install_github('satijalab/seurat-wrappers')
+```
+
+
+```{r import-monocle}
+# Monocle3 how to
+# https://cole-trapnell-lab.github.io/monocle3/docs/getting_started/
+# https://cole-trapnell-lab.github.io/monocle3/docs/trajectories/
+
+# Transfering Seurat object to monocle (cell data set)
+# Can also be done "manually" by extracting expr-data and meta-data and creating a new cell data set
+# https://htmlpreview.github.io/?https://github.com/satijalab/seurat-wrappers/blob/master/docs/monocle3.html
+# https://github.com/satijalab/seurat/issues/5857
+
+library(SeuratWrappers)
+library(monocle3)
+```
+
+
+### Mel79
+
+Mel79 was chosen because it has more data than any other cell type/tumor sample
+
+```{r}
+mel79 <- subset(malignant_cells, subset = tumor_id == "Mel79")
+# mel79 <- as.CellDataSet(mel79) # doesn't work
+
+gene_names <- rownames(mel79[["RNA"]])
+head(gene_names)
+```
+
+```{r}
+mel79 <- as.cell_data_set(mel79) # from SeuratWrappers
+
+mel79 <- estimate_size_factors(mel79)
+mel79
+```
+
+
+```{r}
+# Problem with SeuratWrappers not transferring gene names
+# https://github.com/satijalab/seurat-wrappers/issues/54
+mel79@rowRanges@elementMetadata@listData[["gene_short_name"]] <- gene_names
+```
+
+
+```{r fig.height=3, fig.width=4}
+
+# Experiment with different methods
+
+# Other preprocess method
+# method='PCA' and preprocess_method='PCA' instead of LSI
+mel79 <- preprocess_cds(mel79, num_dim = 50, method='LSI')
+mel79 <- reduce_dimension(mel79, reduction_method = 'LSI', preprocess_method='LSI')
+mel79 <- reduce_dimension(mel79, reduction_method = 'UMAP', preprocess_method='LSI')
+mel79 <- reduce_dimension(mel79, reduction_method = 'tSNE', preprocess_method='LSI')
+mel79 <- cluster_cells(mel79)
+
+# colnames(pData(mel79))
+
+plot_cells(mel79,
+           reduction_method="UMAP",
+           label_groups_by_cluster=FALSE,
+           cell_size=0.5,
+           show_trajectory_graph=FALSE)
+           # color_cells_by="partition")
+           # color_cells_by = "cell_type")
+```
+
+```{r fig.height=4, fig.width=8}
+ciliated_genes <- c("MITF", "AXL")
+
+plot_cells(mel79,
+           reduction_method="UMAP",
+           genes=ciliated_genes,
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE,
+           cell_size=1)
+```
+
+
+```{r fig.height=4, fig.width=5}
+# Learn graph
+mel79 <- learn_graph(mel79)
+
+# Visualize the learned graph
+plot_cells(mel79,
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           show_trajectory_graph=T)
+```
+
+
+```{r fig.height=4, fig.width=6}
+
+# Order cells by choosing the root state
+# order_cells starts interactive session
+# https://rdrr.io/github/cole-trapnell-lab/monocle3/man/order_cells.html
+# https://cole-trapnell-lab.github.io/monocle3/docs/trajectories/
+
+mel79 <- order_cells(mel79)
+
+plot_cells(mel79,
+           label_cell_groups=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=1.5,
+           cell_size=1)
+```
+
+
+Mel78 and Mel 88 were also tested using above methods, but with similar results.
+
+
+## Session info
+
+In order to ensure reproducibility of this notebook, information about packages used in the analysis is provided below
+
+
+```{r sesh-info}
+# https://stackoverflow.com/questions/21967254/how-to-write-a-reader-friendly-sessioninfo-to-text-file
+writeLines(capture.output(sessionInfo()), "msb_project_sessioninfo.txt")
+sessionInfo()
+```
+
