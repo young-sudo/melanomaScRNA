@@ -110,6 +110,6 @@ ggsave(
 )
 
 
-outfile <- file.path(out_dir, "non_malignant_processed.rds")
+outfile <- file.path(out_dir, "non_malignant_dimreduced.rds")
 saveRDS(non_malignant, file = outfile)
 message("Saved non-malignant processed object to ", outfile)

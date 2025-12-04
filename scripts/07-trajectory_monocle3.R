@@ -7,10 +7,23 @@
 library(Seurat)
 library(SeuratWrappers)
 library(monocle3)
+library(optparse)
 
-malignant <- readRDS("data/processed/malignant_processed.rds")
+malignant <- readRDS("results/malignant/dimreduce/malignant_dimreduced.rds")
+outdir <- "results/malignant/trajectory"
 
-# Example: choose Mel79 (as in your Rmd)
+option_list <- list(
+  make_option(c("-i", "--input"), type="character", default=malignant, help="Input file"),
+  make_option(c("-o", "--outdir"), type="character", default=out_dir, help="Output directory")
+)
+
+opt_parser <- OptionParser(option_list=option_list)
+opt <- parse_args(opt_parser)
+malignant <- opt$input
+out_dir <- opt$outdir
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Example: choose Mel79 tumor cell lines
 if (!"tumor_id" %in% colnames(malignant@meta.data)) stop("tumor_id not found in metadata")
 mel79 <- subset(malignant, subset = tumor_id == "Mel79")
 
@@ -32,5 +45,6 @@ cds <- learn_graph(cds)
 # Example: choose a cell with minimal pseudotime after learn_graph
 # cds <- order_cells(cds)
 
-saveRDS(cds, file = "data/processed/mel79_monocle_cds.rds")
-message("Saved Monocle3 CDS to data/processed/mel79_monocle_cds.rds")
+outfile <- file.path(out_dir, "mel79_monocle_cds.rds")
+saveRDS(cds, file = outfile)
+message("Saved Monocle3 CDS to ", outfile)
