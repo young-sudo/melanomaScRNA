@@ -14,8 +14,8 @@ The dataset used in this project can be found [here](https://www.ncbi.nlm.nih.go
 Reference article: Tirosh et al., 2016 - Dissecting the multicellular ecosystem of metastatic melanoma by single-cell RNA-seq ([PubMed](https://pubmed.ncbi.nlm.nih.gov/27124452/))
 
 <p align="center">
-  <img src="figures/plot_m-tsne-novf-tumor.png" alt="malignant-tsne" width="300"/>
-  <img src="figures/plot_nm-tsne-vf-cell.png" alt="malignant-tsne" width="300"/>
+  <img src="https://raw.githubusercontent.com/young-sudo/scrna-pipe/main/figures/plot_m-tsne-novf-tumor.png" width="300"/>
+  <img src="https://raw.githubusercontent.com/young-sudo/scrna-pipe/main/figures/plot_nm-tsne-vf-cell.png" width="300"/>
 </p>
 
 ---
